@@ -28,8 +28,6 @@
 #import <QuartzCore/QuartzCore.h>
 #import "UIImage+Blur.h"
 
-#define SYSTEM_VERSION_LESS_THAN(v)                 ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] == NSOrderedAscending)
-
 static NSTimeInterval const kModalViewAnimationDuration = 0.3;
 static CGFloat const kBlurValue = 0.2;
 static CGFloat const kDefaultiPhoneCornerRadius = 4;
@@ -44,48 +42,63 @@ static NSInteger const kDepthModalOptionTapMask = 1 << 9;
 @property (nonatomic, strong) UIView *coverView;
 @property (nonatomic, strong) UIView *popupView;
 @property (nonatomic, assign) CGAffineTransform initialPopupTransform;
-@property (nonatomic, strong) UIImageView *blurView;
+@property (nonatomic, strong) UIImageView *backgroundView;
 @property (nonatomic, strong) void(^completionHandler)();
+@property (nonatomic, strong) UIWindow *originalWindow;
+@property (nonatomic, strong) UIWindow *popupWindow;
+@property (nonatomic) CGFloat keyboardHeight;
+
+- (void)keyboardWillShow:(NSNotification *)note;
+- (void)keyboardWillHide:(NSNotification *)note;
+
 @end
 
 @implementation ASDepthModalViewController
 
-- (id)init
+- (id)initWithNibName:(NSString *)nibNameOrNil bundle:(NSBundle *)nibBundleOrNil
 {
-    self = [super init];
+    self = [super initWithNibName:nibNameOrNil bundle:nibBundleOrNil];
     if (self)
     {
-        self.view.backgroundColor = [UIColor blackColor];
-        self.view.autoresizingMask = UIViewAutoresizingFlexibleHeight | UIViewAutoresizingFlexibleWidth;                
-        self.view.backgroundColor = [UIColor blackColor];
+        self.view.backgroundColor = [UIColor whiteColor];
+        self.view.autoresizingMask = UIViewAutoresizingFlexibleHeight | UIViewAutoresizingFlexibleWidth;
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
     }
     return self;
 }
 
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
 - (void)restoreRootViewController
 {
-    UIWindow *window;
-    
-    window = [UIApplication sharedApplication].keyWindow;
-    [self.rootViewController.view removeFromSuperview];
-    self.rootViewController.view.transform = window.rootViewController.view.transform;
-    window.rootViewController = self.rootViewController;
+//    UIWindow *window;
+//    
+//    window = [UIApplication sharedApplication].keyWindow;
+//    [self.rootViewController.view removeFromSuperview];
+//    self.rootViewController.view.transform = window.rootViewController.view.transform;
+//    window.rootViewController = self.rootViewController;
+    [self.originalWindow makeKeyAndVisible];
+    [self setOriginalWindow:nil];
 }
 
 - (void)dismiss
 {
     [UIView animateWithDuration:kModalViewAnimationDuration
                      animations:^{
-                         self.coverView.alpha = 0;
-                         self.rootViewController.view.transform = CGAffineTransformIdentity;
+                         self.view.alpha = 0;
                          self.popupView.transform = self.initialPopupTransform;
-                         self.blurView.alpha = 0;
+                         [self.popupWindow setBackgroundColor:[UIColor clearColor]];
+                         [self.backgroundView setTransform:CGAffineTransformIdentity];
                      }
                      completion:^(BOOL finished) {
-                         [self.rootViewController.view.layer setMasksToBounds:NO];
-                         [self.blurView removeFromSuperview];
-                         [self restoreRootViewController];
-                         self.rootViewController.view.layer.cornerRadius = 0;
+                         [self.view.window setRootViewController:nil];
+                         [self.originalWindow makeKeyAndVisible];
+                         [self setOriginalWindow:nil];
+                         [self setPopupWindow:nil];
                          
                          if (self.completionHandler) {
                              self.completionHandler();
@@ -129,99 +142,83 @@ static NSInteger const kDepthModalOptionTapMask = 1 << 9;
 - (void)presentView:(UIView *)view withBackgroundColor:(UIColor *)color options:(ASDepthModalOptions)options completionHandler:(void(^)())handler
 {
     UIWindow *window;
-    CGRect frame;
     
     if(color != nil)
     {
         self.view.backgroundColor = color;
     }
-    self.completionHandler = handler;
 
     window = [UIApplication sharedApplication].keyWindow;
-    self.rootViewController = window.rootViewController;
-    frame = self.rootViewController.view.frame;
-    if(![UIApplication sharedApplication].isStatusBarHidden)
-    {
-        self.rootViewController.view.layer.cornerRadius = ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad?kDefaultiPadCornerRadius:kDefaultiPhoneCornerRadius);
-        // Take care of the status bar only if the frame is full screen, which depends on the View controller type.
-        // For example, frame is full screen with UINavigationController, but not with basic UIViewController.
-       
-       if (SYSTEM_VERSION_LESS_THAN(@"7.0")) {
-            if(UIInterfaceOrientationIsPortrait(self.rootViewController.interfaceOrientation))
-           {
-               if(frame.size.height == window.bounds.size.height)
-              {
-                 frame.size.height -= [UIApplication sharedApplication].statusBarFrame.size.height;
-              }
-           }
-            else
-           {
-             if(frame.size.width == window.bounds.size.width)
-              {
-                 frame.size.width -= [UIApplication sharedApplication].statusBarFrame.size.width;
-              }
-           }
-        }
-    }
-    self.view.transform = self.rootViewController.view.transform;
-    self.rootViewController.view.transform = CGAffineTransformIdentity;
-    frame.origin = CGPointZero;
-    self.rootViewController.view.frame = frame;
-    [self.view addSubview:self.rootViewController.view];
-    window.rootViewController = self;
+    [self setOriginalWindow:window];
 
-    self.popupView = [[UIView alloc] initWithFrame:view.frame];
-    self.popupView.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
-    [self.popupView addSubview:view];
-    
-    self.coverView = [[UIView alloc] initWithFrame:self.rootViewController.view.bounds];
+    // take a screenshot of the original window, and add it into ourselves.
+    UIImage *screenshot = [self screenshotForView:window];
+    UIImageView *backgroundView = [[UIImageView alloc] initWithImage:screenshot];
+
+    if ((options & kDepthModalOptionBlurMask) == ASDepthModalOptionBlur)
+    {
+        [backgroundView setImage:[backgroundView.image boxblurImageWithBlur:kBlurValue]];
+        [backgroundView setAlpha:0.0f];
+    }
+    [self setBackgroundView:backgroundView];
+
+    [self.view addSubview:backgroundView];
+    [self setPopupWindow:[[UIWindow alloc] initWithFrame:window.frame]];
+    [self.popupWindow setBackgroundColor:[UIColor clearColor]];
+    [self.view setBackgroundColor:[UIColor clearColor]];
+    [self.popupWindow setWindowLevel:UIWindowLevelAlert];
+    [self.popupWindow setRootViewController:self];
+    [self.popupWindow makeKeyAndVisible];
+
+    self.coverView = [[UIView alloc] initWithFrame:window.frame];
     self.coverView.autoresizingMask = UIViewAutoresizingFlexibleHeight | UIViewAutoresizingFlexibleWidth;
     self.coverView.backgroundColor = [UIColor colorWithRed:00/255.0 green:00/255.0 blue:00/255.0 alpha:0.5];
     [self.view addSubview:self.coverView];
     
     if ((options & kDepthModalOptionTapMask) == ASDepthModalOptionTapOutsideToClose)
-    {    
+    {
         UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleCloseAction:)];
         tapGesture.delegate = self;
         [self.coverView addGestureRecognizer:tapGesture];
     }
+    [self.coverView setAlpha:0.0f];
+
+    self.popupView = [[UIView alloc] initWithFrame:view.frame];
+    self.popupView.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
+    [self.popupView addSubview:view];
+    
     
     [self.coverView addSubview:self.popupView];
-    self.popupView.center = CGPointMake(self.coverView.bounds.size.width/2, self.coverView.bounds.size.height/2);
+    self.popupView.center = CGPointMake(self.coverView.bounds.size.width/2, (self.coverView.bounds.size.height - self.keyboardHeight)/2);
+
     
-    self.coverView.alpha = 0;
-        
-    if ((options & kDepthModalOptionBlurMask) == ASDepthModalOptionBlur) {
-        UIImage *image;
-        
-        image = [self screenshotForView:self.rootViewController.view];
-        image = [image boxblurImageWithBlur:kBlurValue];
-        self.blurView = [[UIImageView alloc] initWithImage:image];
-        self.blurView.autoresizingMask = UIViewAutoresizingFlexibleHeight | UIViewAutoresizingFlexibleWidth;
-        self.blurView.alpha = 0;
-        [self.rootViewController.view addSubview:self.blurView];
-    }
-    
-    [self.rootViewController.view.layer setMasksToBounds:YES];
     [UIView animateWithDuration:kModalViewAnimationDuration
                      animations:^{
-                         self.rootViewController.view.transform = CGAffineTransformMakeScale(0.9, 0.9);
-                         self.coverView.alpha = 1;
-                         self.blurView.alpha = 1;
+//                         self.rootViewController.view.transform = CGAffineTransformMakeScale(0.9, 0.9);
+//                         self.coverView.alpha = 1;
+                         [backgroundView setTransform:CGAffineTransformMakeScale(0.9f, 0.9f)];
+                         backgroundView.alpha = 1;
+                         [self.popupWindow setBackgroundColor:color];
+                         [self.coverView setAlpha:1.0f];
+                     } completion:^(BOOL finished) {
+                         if (handler != nil)
+                             handler();
                      }];
+    
     [self animatePopupWithStyle:options];
+    return;
 }
 
 - (UIImage*)screenshotForView:(UIView *)view
 {
-    UIGraphicsBeginImageContext(view.bounds.size);
+    UIGraphicsBeginImageContextWithOptions(view.bounds.size, NO, [UIScreen mainScreen].scale);
     [view.layer renderInContext:UIGraphicsGetCurrentContext()];
     UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
     
     // hack, helps w/ our colors when blurring
-    NSData *imageData = UIImageJPEGRepresentation(image, 1); // convert to jpeg
-    image = [UIImage imageWithData:imageData];
+    NSData *imageData = UIImagePNGRepresentation(image);
+    image = [UIImage imageWithData:imageData scale:[UIScreen mainScreen].scale];
     
     return image;
 }
@@ -234,18 +231,9 @@ static NSInteger const kDepthModalOptionTapMask = 1 << 9;
 
 - (void)willAnimateRotationToInterfaceOrientation:(UIInterfaceOrientation)interfaceOrientation duration:(NSTimeInterval)duration
 {
-    self.rootViewController.view.transform = CGAffineTransformIdentity;
-    self.rootViewController.view.bounds = self.view.bounds;
-    if(self.blurView != nil)
-    {
-        UIImage *image;
-        
-        self.blurView.hidden = YES;
-        image = [self screenshotForView:self.rootViewController.view];
-        self.blurView.hidden = NO;
-        self.blurView.image = [image boxblurImageWithBlur:kBlurValue];
-    }
-    self.rootViewController.view.transform = CGAffineTransformMakeScale(0.9, 0.9);
+    self.view.transform = CGAffineTransformIdentity;
+    self.view.bounds = self.view.bounds;
+    self.view.transform = CGAffineTransformMakeScale(0.9, 0.9);
 }
 
 + (void)presentView:(UIView *)view
@@ -294,10 +282,58 @@ static NSInteger const kDepthModalOptionTapMask = 1 << 9;
     }
 }
 
++ (void)replaceView:(UIView *)view
+{
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    if([window.rootViewController isKindOfClass:[ASDepthModalViewController class]])
+    {
+        ASDepthModalViewController *controller = (ASDepthModalViewController *)window.rootViewController;
+        UIView *popupView = [[UIView alloc] initWithFrame:view.frame];
+        [popupView setCenter:controller.popupView.center];
+        popupView.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleRightMargin;
+        [popupView addSubview:view];
+        
+        [controller.popupView removeFromSuperview];
+        controller.popupView.center = CGPointMake(controller.coverView.bounds.size.width/2, (controller.coverView.bounds.size.height - controller.keyboardHeight)/2);
+        [controller.coverView addSubview:popupView];
+        [controller setPopupView:popupView];
+    }
+}
+
 #pragma mark - Action
+
 - (void)handleCloseAction:(id)sender
 {
     [self dismiss];
+}
+
+- (void)keyboardWillShow:(NSNotification *)note
+{
+    CGRect keyboardFrame = [[note.userInfo objectForKey:UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    [self setKeyboardHeight:keyboardFrame.size.height];
+    
+    // we're already showing the popup, re-center it
+    if (self.popupView != nil)
+    {
+        [UIView animateWithDuration:[[note.userInfo objectForKey:UIKeyboardAnimationDurationUserInfoKey] doubleValue] animations:^
+        {
+            self.popupView.center = CGPointMake(self.coverView.bounds.size.width/2, (self.coverView.bounds.size.height - self.keyboardHeight)/2);
+        }];
+    }
+}
+
+- (void)keyboardWillHide:(NSNotification *)note
+{
+    [self setKeyboardHeight:0.0f];
+    
+    // we're already showing the popup, re-center it
+    if (self.popupView != nil)
+    {
+        [UIView animateWithDuration:[[note.userInfo objectForKey:UIKeyboardAnimationDurationUserInfoKey] doubleValue] animations:^
+        {
+            self.popupView.center = CGPointMake(self.coverView.bounds.size.width/2, self.coverView.bounds.size.height/2);
+        }];
+    }
 }
 
 @end
